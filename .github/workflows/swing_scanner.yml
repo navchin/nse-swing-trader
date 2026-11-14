@@ -1,0 +1,40 @@
+name: NSE Swing Scanner
+
+on:
+  # Runs at 9:15 AM IST = 3:45 AM UTC, Monday to Friday
+  schedule:
+    - cron: "45 3 * * 1-5"
+
+  # Allows you to run manually from GitHub Actions tab anytime
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run NSE Swing Scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
+
+      - name: Save paper trades CSV as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: paper-trades-${{ github.run_number }}
+          path: paper_trades.csv
+          retention-days: 90
