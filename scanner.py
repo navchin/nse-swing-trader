@@ -9,7 +9,7 @@ Outputs: list of signals with entry, stop-loss, target in ₹
 
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
+import ta
 from datetime import datetime, timedelta
 import json
 
@@ -27,83 +27,96 @@ NIFTY50 = [
     "TECHM.NS", "BRITANNIA.NS", "BAJAJ-AUTO.NS", "UPL.NS", "SHRIRAMFIN.NS"
 ]
 
-# ── Parameters (swing trading) ──────────────────────────────────────────────
-RSI_OVERSOLD      = 45   # RSI below this = potential bounce
-RSI_UPPER_LIMIT   = 60   # RSI should not be too high already
-EMA_SHORT         = 50
-EMA_LONG          = 200
-ATR_PERIOD        = 14
-MIN_RR_RATIO      = 2.0  # Minimum risk:reward = 1:2
-LOOKBACK_DAYS     = 90   # Enough for EMA-200
+# ── Parameters ──────────────────────────────────────────────────────────────
+RSI_LOWER       = 30
+RSI_UPPER       = 45
+EMA_SHORT       = 50
+EMA_LONG        = 200
+ATR_PERIOD      = 14
+MIN_RR_RATIO    = 2.0
+LOOKBACK_DAYS   = 100
 
 
-def fetch_data(ticker: str) -> pd.DataFrame | None:
+def fetch_data(ticker: str):
     """Download OHLCV data for a ticker."""
     try:
         end   = datetime.today()
         start = end - timedelta(days=LOOKBACK_DAYS)
-        df = yf.download(ticker, start=start, end=end, progress=False, auto_adjust=True)
-        if df is None or len(df) < 50:
+        df = yf.download(ticker, start=start, end=end,
+                         progress=False, auto_adjust=True)
+        if df is None or len(df) < 60:
             return None
-        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+        # Flatten multi-level columns if present
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
         return df
-    except Exception:
+    except Exception as e:
+        print(f"  ⚠️  Fetch error {ticker}: {e}")
         return None
 
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Add RSI, EMA-50, EMA-200, ATR to dataframe."""
-    df["RSI"]     = ta.rsi(df["Close"], length=14)
-    df["EMA50"]   = ta.ema(df["Close"], length=EMA_SHORT)
-    df["EMA200"]  = ta.ema(df["Close"], length=EMA_LONG)
-    atr           = ta.atr(df["High"], df["Low"], df["Close"], length=ATR_PERIOD)
-    df["ATR"]     = atr
+    """Add RSI, EMA-50, EMA-200, ATR using ta library."""
+    close = df["Close"]
+    high  = df["High"]
+    low   = df["Low"]
+
+    df["RSI"]    = ta.momentum.RSIIndicator(close, window=14).rsi()
+    df["EMA50"]  = ta.trend.EMAIndicator(close, window=EMA_SHORT).ema_indicator()
+    df["EMA200"] = ta.trend.EMAIndicator(close, window=EMA_LONG).ema_indicator()
+    df["ATR"]    = ta.volatility.AverageTrueRange(
+                       high, low, close, window=ATR_PERIOD).average_true_range()
     return df
 
 
-def is_swing_setup(df: pd.DataFrame) -> dict | None:
+def is_swing_setup(df: pd.DataFrame, ticker: str):
     """
-    Bullish swing setup conditions:
-    1. Price is ABOVE EMA-200  →  uptrend intact
-    2. Price pulled back to near EMA-50  →  dip opportunity
-    3. RSI is between 30–45  →  oversold but not broken
-    4. Today's RSI > yesterday's RSI  →  momentum turning up
-    5. Risk:Reward >= 1:2 using ATR
+    Bullish swing setup:
+    1. Price > EMA-200  →  uptrend intact
+    2. Price <= EMA-50 * 1.03  →  pulled back, cheap entry
+    3. RSI between 30–45  →  oversold bounce zone
+    4. RSI today > yesterday  →  momentum turning up
+    5. Risk:Reward >= 1:2
     """
     if df is None or len(df) < 3:
         return None
 
-    latest   = df.iloc[-1]
-    prev     = df.iloc[-2]
+    latest = df.iloc[-1]
+    prev   = df.iloc[-2]
 
-    cmp      = round(float(latest["Close"]), 2)
-    rsi      = round(float(latest["RSI"]),   2)
-    rsi_prev = round(float(prev["RSI"]),     2)
-    ema50    = round(float(latest["EMA50"]),  2)
-    ema200   = round(float(latest["EMA200"]), 2)
-    atr      = round(float(latest["ATR"]),   2)
-
-    # Skip if any indicator is NaN
-    if any(v != v for v in [cmp, rsi, ema50, ema200, atr]):
+    try:
+        cmp      = round(float(latest["Close"]), 2)
+        rsi      = round(float(latest["RSI"]),   2)
+        rsi_prev = round(float(prev["RSI"]),     2)
+        ema50    = round(float(latest["EMA50"]),  2)
+        ema200   = round(float(latest["EMA200"]), 2)
+        atr      = round(float(latest["ATR"]),   2)
+        volume   = float(latest["Volume"])
+    except Exception:
         return None
 
-    # Condition checks
-    above_ema200   = cmp > ema200                      # uptrend
-    near_ema50     = cmp <= ema50 * 1.03               # within 3% of EMA-50
-    rsi_oversold   = RSI_OVERSOLD > rsi > 30           # dip zone
-    rsi_turning    = rsi > rsi_prev                    # momentum up
-    volume_ok      = float(latest["Volume"]) > 100000  # min liquidity
+    # Skip NaN values
+    import math
+    if any(math.isnan(v) for v in [cmp, rsi, ema50, ema200, atr]):
+        return None
 
-    if not all([above_ema200, near_ema50, rsi_oversold, rsi_turning, volume_ok]):
+    # Conditions
+    above_ema200 = cmp > ema200
+    near_ema50   = cmp <= ema50 * 1.03
+    rsi_zone     = RSI_LOWER < rsi < RSI_UPPER
+    rsi_turning  = rsi > rsi_prev
+    volume_ok    = volume > 100000
+
+    if not all([above_ema200, near_ema50, rsi_zone, rsi_turning, volume_ok]):
         return None
 
     # Price levels
-    entry      = cmp
-    stop_loss  = round(entry - (1.5 * atr), 2)
-    target     = round(entry + (3.0 * atr), 2)
-    risk       = round(entry - stop_loss,   2)
-    reward     = round(target - entry,      2)
-    rr_ratio   = round(reward / risk,       2) if risk > 0 else 0
+    entry     = cmp
+    stop_loss = round(entry - (1.5 * atr), 2)
+    target    = round(entry + (3.0 * atr), 2)
+    risk      = round(entry - stop_loss,   2)
+    reward    = round(target - entry,      2)
+    rr_ratio  = round(reward / risk, 2) if risk > 0 else 0
 
     if rr_ratio < MIN_RR_RATIO:
         return None
@@ -126,27 +139,30 @@ def is_swing_setup(df: pd.DataFrame) -> dict | None:
     }
 
 
-def run_scanner() -> list[dict]:
+def run_scanner() -> list:
     """Scan all Nifty 50 stocks and return signals."""
     signals = []
-    print(f"🔍 Scanning {len(NIFTY50)} Nifty 50 stocks...")
+    print(f"🔍 Scanning {len(NIFTY50)} Nifty 50 stocks...\n")
 
     for ticker in NIFTY50:
         df = fetch_data(ticker)
         if df is None:
+            print(f"  ⚠️  Skipped: {ticker} (no data)")
             continue
         df = calculate_indicators(df)
-        signal = is_swing_setup(df)
+        signal = is_swing_setup(df, ticker)
         if signal:
             signals.append(signal)
-            print(f"  ✅ Signal found: {signal['ticker']} | CMP ₹{signal['cmp']} | RSI {signal['rsi']}")
+            print(f"  ✅ SIGNAL: {signal['ticker']:<14} CMP ₹{signal['cmp']:<10} RSI {signal['rsi']}")
         else:
-            print(f"  ⏭  No setup:    {ticker.replace('.NS','')}")
+            print(f"  ⏭  No setup: {ticker.replace('.NS','')}")
 
-    print(f"\n📊 Scan complete. {len(signals)} signal(s) found.")
+    print(f"\n📊 Scan complete — {len(signals)} signal(s) found.")
     return signals
 
 
 if __name__ == "__main__":
     signals = run_scanner()
-    print(json.dumps(signals, indent=2))
+    if signals:
+        print("\n── Signals ──")
+        print(json.dumps(signals, indent=2))
