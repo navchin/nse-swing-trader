@@ -1,23 +1,14 @@
 name: NSE Swing Scanner
 
 on:
-  # Morning scan — 9:15 AM IST = 3:45 AM UTC (Mon–Fri)
-  # Evening scan — 3:15 PM IST = 9:45 AM UTC (Mon–Fri)
   schedule:
-    - cron: "45 3 * * 1-5"
-    - cron: "45 9 * * 1-5"
-
-  # Run manually anytime from GitHub Actions tab
+    - cron: "45 3 * * 1-5"    # 9:15 AM IST (3:45 AM UTC) - MORNING
+    - cron: "45 9 * * 1-5"    # 3:15 PM IST (9:45 AM UTC) - EVENING
   workflow_dispatch:
     inputs:
       scan_type:
-        description: 'Which scan to run'
-        required: true
-        default: 'morning'
-        type: choice
-        options:
-          - morning
-          - evening
+        description: 'manual override: morning or evening'
+        required: false
 
 jobs:
   scan:
